@@ -139,6 +139,9 @@ def create_model(fingerprint_input, model_settings, model_architecture,
   elif model_architecture == 'tiny_embedding_conv':
     return create_tiny_embedding_conv_model(fingerprint_input, model_settings,
                                             is_training)
+  elif model_architecture == 'ds_cnn':
+    return create_ds_cnn_model(fingerprint_input, model_settings,
+                                            is_training)                                            
   else:
     raise Exception('model_architecture argument "' + model_architecture +
                     '" not recognized, should be one of "single_fc", "conv",' +
@@ -756,6 +759,105 @@ def create_tiny_conv_model(fingerprint_input, model_settings, is_training):
     return final_fc, dropout_rate
   else:
     return final_fc
+
+def create_ds_cnn_model(fingerprint_input, model_settings,is_training):
+  """Builds a model with convolutional & depthwise separable convolutional layers.
+
+  For more details see https://arxiv.org/abs/1711.07128.
+
+  Args:
+      model_settings: Dict of different settings for model training.
+      model_size_info: Defines number of layers, followed by the DS-Conv layer
+          parameters in the order {number of conv features, conv filter height,
+          width and stride in y,x dir.} for each of the layers.
+
+  Returns:
+      tf.keras Model of the 'DS-CNN' architecture.
+  """
+  if is_training:
+    dropout_rate = tf.compat.v1.placeholder(tf.float32, name='dropout_rate')
+
+  label_count = model_settings['label_count']
+  input_frequency_size = model_settings['fingerprint_width']
+  input_time_size = model_settings['spectrogram_length']
+
+  t_dim = input_time_size
+  f_dim = input_frequency_size
+
+  model_size_info=[5, 172, 10, 4, 2, 1, 172, 3, 3, 2, 2, 172, 3, 3, 1, 1, 172, 3, 3, 1, 1, 172, 3, 3, 1, 1]
+  # Extract model dimensions from model_size_info.
+  num_layers = model_size_info[0]
+  conv_feat = [None]*num_layers
+  conv_kt = [None]*num_layers
+  conv_kf = [None]*num_layers
+  conv_st = [None]*num_layers
+  conv_sf = [None]*num_layers
+
+  i = 1
+  for layer_no in range(0, num_layers):
+    conv_feat[layer_no] = model_size_info[i]
+    i += 1
+    conv_kt[layer_no] = model_size_info[i]
+    i += 1
+    conv_kf[layer_no] = model_size_info[i]
+    i += 1
+    conv_st[layer_no] = model_size_info[i]
+    i += 1
+    conv_sf[layer_no] = model_size_info[i]
+    i += 1
+
+  #inputs = tf.keras.Input(shape=(model_settings['fingerprint_size']), name='input')
+  fingerprint_size = int(model_settings['fingerprint_size'])
+  input_shape = (fingerprint_size,)
+  inputs = tf.keras.Input(shape=input_shape, name='input')
+
+  # Reshape the flattened input.
+# x = tf.reshape(inputs, shape=(-1, input_time_size, input_frequency_size, 1))
+  reshape_layer = tf.keras.layers.Reshape((input_time_size, input_frequency_size,1))
+  x = reshape_layer(inputs)
+  
+  # Depthwise separable convolutions.
+  for layer_no in range(0, num_layers):
+    if layer_no == 0:
+      # First convolution.
+      x = tf.keras.layers.Conv2D(filters=conv_feat[0],
+                                 kernel_size=(conv_kt[0], conv_kf[0]),
+                                 strides=(conv_st[0], conv_sf[0]),
+                                 padding='SAME')(x)
+      x = tf.keras.layers.BatchNormalization()(x)
+      x = tf.keras.layers.ReLU()(x)
+    else:
+      # Depthwise convolution.
+      x = tf.keras.layers.DepthwiseConv2D(kernel_size=(conv_kt[layer_no], conv_kf[layer_no]),
+                                          strides=(conv_sf[layer_no], conv_st[layer_no]),
+                                          padding='SAME')(x)
+      x = tf.keras.layers.BatchNormalization()(x)
+      x = tf.keras.layers.ReLU()(x)
+
+      # Pointwise convolution.
+      x = tf.keras.layers.Conv2D(filters=conv_feat[layer_no], kernel_size=(1, 1))(x)
+      x = tf.keras.layers.BatchNormalization()(x)
+      x = tf.keras.layers.ReLU()(x)
+
+    t_dim = math.ceil(t_dim/float(conv_st[layer_no]))
+    f_dim = math.ceil(f_dim/float(conv_sf[layer_no]))
+
+  # Global average pool.
+  x = tf.keras.layers.AveragePooling2D(pool_size=(t_dim, f_dim), strides=1)(x)
+
+  # Squeeze before passing to output fully connected layer.
+  #x = tf.reshape(x, shape=(-1, conv_feat[layer_no]))
+  reshape_layer2 = tf.keras.layers.Reshape((conv_feat[layer_no],))
+  x = reshape_layer2(x)
+
+
+  # Output connected layer.
+  output = tf.keras.layers.Dense(units=label_count, activation='softmax')(x)
+
+  if is_training:
+    return output, dropout_rate
+  else:
+    return output
 
 
 def create_tiny_embedding_conv_model(fingerprint_input, model_settings,
